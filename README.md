@@ -1,12 +1,17 @@
 # 📄 RAG Chatbot
 
-A production-hardened Retrieval-Augmented Generation chatbot with:
+A production-hardened Retrieval-Augmented Generation chatbot with advanced features:
+
 - **Dual reranker support**: Cohere API or BGE local model, switchable live in the UI
 - **Reranker-conditional score normalisation**: prevents rank collapse with BGE logits
 - **Stable synthesis detection**: deterministic span hashing, not LLM self-assessment
 - **Lost-in-the-middle mitigation**: 1,N,2,N-1 interleaved chunk ordering
 - **Decoupled summariser**: prevents memory drift over long conversations
 - **Prompt injection defence**: retrieved content treated as untrusted data
+- **Voice integration**: Speech-to-text input and text-to-speech output with multiple accents
+- **Analytics dashboard**: Track queries, response times, source usage, and retrieval patterns
+- **Document upload**: Add documents directly through the UI without manual file management
+- **Export capabilities**: Export chat history as JSON, text, or formatted PDF
 
 ---
 
@@ -39,6 +44,8 @@ pip install -r requirements.txt
 > **Note on BGE:** If using the BGE reranker, `sentence-transformers` will
 > download `BAAI/bge-reranker-large` (~1.5GB) on first run. This is automatic.
 
+> **Note on Voice Features:** Voice input/output requires `SpeechRecognition`, `gTTS`, and `audio-recorder-streamlit`. These are optional - the app will run without them if not installed.
+
 ### 2. Configure API keys
 
 ```bash
@@ -53,14 +60,21 @@ COHERE_API_KEY=...             # Required only if using Cohere reranker
 
 ### 3. Add your documents
 
-Drop any `.pdf`, `.docx`, or `.txt` files into the `./docs/` folder:
+You have two options:
+
+**Option A: Manual file placement**
 ```bash
 mkdir docs
 cp your_paper.pdf docs/
 cp your_manual.docx docs/
 ```
 
-### 4. Run ingestion
+**Option B: Upload through UI** (after launching the app)
+- Use the "Upload Documents" section in the sidebar
+- Supports PDF, DOCX, and TXT files
+- Automatically processes and adds to vectorstore
+
+### 4. Run ingestion (if using Option A)
 
 ```bash
 python ingest.py
@@ -76,6 +90,50 @@ python ingest.py --input_dir ./my_docs --output_dir ./vectorstore --chunk_size 2
 ```bash
 streamlit run app.py
 ```
+
+The app will be available at `http://localhost:8501`
+
+---
+
+## Key Features
+
+### Voice Integration
+
+The chatbot supports voice input and output for hands-free interaction:
+
+- **Speech-to-Text**: Record questions using your microphone
+- **Text-to-Speech**: Hear responses read aloud with multiple accent options (British, American, Australian, Indian)
+- **Auto-play**: Optionally enable automatic audio playback for all responses
+- Uses Google Speech Recognition API for transcription
+- Powered by gTTS (Google Text-to-Speech) for audio generation
+
+### Analytics Dashboard
+
+Track and analyze your chatbot usage:
+
+- **Query metrics**: Total queries, average/min/max response times
+- **Response time trends**: Visualize performance over time
+- **Source usage**: See which documents are retrieved most frequently
+- **Reranker statistics**: Compare Cohere vs BGE usage
+- **Retrieval settings**: Monitor average k and top_n values
+- **Export analytics**: Download usage data as JSON
+
+### Export Chat History
+
+Save your conversations in multiple formats:
+
+- **JSON**: Structured data with full metadata and sources
+- **Text**: Plain text format for easy reading
+- **PDF**: Professionally formatted document with proper text wrapping
+
+### Document Upload
+
+Add documents without restarting the app:
+
+- Upload PDF, DOCX, or TXT files directly through the UI
+- Automatic chunking and embedding
+- Seamlessly merges with existing vectorstore
+- No need to manually run `ingest.py`
 
 ---
 
@@ -162,6 +220,17 @@ And validating it at startup in `app.py` before loading the index.
 | Cheaper summariser | Change `gpt-4o-mini` → `gpt-3.5-turbo` in `build_summariser_llm()` |
 | Longer memory window | Increase `max_token_limit` in `build_memory()` |
 | Disable interleaving | Comment out `reranked = interleave_extremes(reranked)` in `run_query()` |
+| Change voice accent | Select from dropdown in UI (British, American, Australian, Indian) |
+| Enable/disable TTS | Toggle "TTS" checkbox in UI |
+
+---
+
+## UI Navigation
+
+The app has two main pages accessible via the sidebar:
+
+1. **💬 Chat**: Main conversation interface with document Q&A
+2. **📊 Analytics**: Dashboard showing usage statistics and trends
 
 ---
 
@@ -185,3 +254,57 @@ A chunk with embed score `0.88` may rank *below* one with `0.74` if the reranker
 | LLM unreliably self-reports synthesis | Deterministic `span_hash` tagging by pipeline |
 | Memory drift over long conversations | Decoupled `gpt-4o-mini` summariser |
 | Mid-ranked chunks ignored (lost-in-middle) | Interleaved 1,N,2,N-1 ordering |
+
+---
+
+## Architecture
+
+The RAG pipeline consists of 8 stages:
+
+1. **Dense retrieval**: FAISS top-k candidates with cosine similarity
+2. **Cross-encoder rerank**: Cohere API or BGE local model
+3. **Score normalisation**: Reranker-specific formulas (linear for Cohere, sigmoid for BGE)
+4. **Span hash tagging**: Deterministic synthesis detection via MD5 fingerprints
+5. **Interleaved ordering**: 1,N,2,N-1 pattern to combat attention decay
+6. **Context formatting**: Scored chunks with metadata for LLM
+7. **Generation**: GPT-4o with temperature=0 and seed=42 for reproducibility
+8. **Memory save**: Compressed by dedicated GPT-4o-mini summariser
+
+### Models Used
+
+- **Embeddings**: `text-embedding-3-small` (OpenAI)
+- **Generator**: `gpt-4o` (OpenAI)
+- **Summariser**: `gpt-4o-mini` (OpenAI) - decoupled to prevent memory drift
+- **Reranker (Cohere)**: `rerank-english-v3.0`
+- **Reranker (BGE)**: `BAAI/bge-reranker-large` (local)
+
+---
+
+## Dependencies
+
+Core dependencies:
+- `openai>=1.0.0` - OpenAI API client
+- `langchain>=0.1.0,<0.2.0` - LLM framework
+- `faiss-cpu>=1.7.4` - Vector similarity search
+- `sentence-transformers>=2.2.2` - BGE reranker
+- `cohere>=4.0.0` - Cohere reranker API
+- `streamlit>=1.32.0` - Web UI framework
+
+Optional voice features:
+- `SpeechRecognition>=3.10.0` - Speech-to-text
+- `gTTS>=2.4.0` - Text-to-speech
+- `audio-recorder-streamlit>=0.0.8` - Audio recording widget
+
+Document processing:
+- `pypdf>=3.0.0` - PDF parsing
+- `python-docx>=1.1.0` - DOCX parsing
+
+Export and analytics:
+- `reportlab>=4.0.0` - PDF generation
+- `pandas>=2.0.0` - Data analysis
+
+---
+
+## License
+
+See [LICENSE](LICENSE) file for details.
