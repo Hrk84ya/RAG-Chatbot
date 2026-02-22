@@ -12,9 +12,13 @@ Features:
 """
 
 import os
+import json
 import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from io import BytesIO
 
 load_dotenv()
 
@@ -22,6 +26,161 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
 from src.chain import initialise_pipeline, run_query
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Export Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def export_chat_json():
+    """Export chat history as JSON."""
+    def serialize_message(msg):
+        if msg["role"] == "assistant" and "sources" in msg:
+            sources = []
+            for doc in msg["sources"]:
+                sources.append({
+                    "page_content": doc.page_content,
+                    "metadata": doc.metadata
+                })
+            return {
+                "role": msg["role"],
+                "content": msg["content"],
+                "sources": sources
+            }
+        return msg
+    return json.dumps([serialize_message(msg) for msg in st.session_state.messages], indent=2)
+
+def export_chat_text():
+    """Export chat history as formatted text."""
+    lines = []
+    for msg in st.session_state.messages:
+        role = msg["role"].capitalize()
+        content = msg["content"]
+        lines.append(f"{role}: {content}")
+        if msg["role"] == "assistant" and "sources" in msg:
+            lines.append("Sources:")
+            for doc in msg["sources"]:
+                m = doc.metadata
+                rerank_score = m.get("rerank_score_norm", "N/A")
+                embed_score = m.get("embedding_score", "N/A")
+                source = m.get("source", "Unknown")
+                page = m.get("page", "")
+                chunk_id = m.get("chunk_id", "")
+                lines.append(f"  - {source} (Page {page}, Chunk {chunk_id}) - Rerank: {rerank_score}, Embed: {embed_score}")
+                lines.append(f"    {doc.page_content[:200]}...")
+            lines.append("")
+        lines.append("")
+    return "\n".join(lines)
+
+def export_chat_pdf():
+    """Export chat history as PDF with proper text wrapping and formatting."""
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.units import inch
+    from reportlab.lib.enums import TA_LEFT
+    from html import escape
+    
+    buffer = BytesIO()
+    pdf_doc = SimpleDocTemplate(buffer, pagesize=letter, 
+                           rightMargin=0.75*inch, leftMargin=0.75*inch,
+                           topMargin=0.75*inch, bottomMargin=0.75*inch)
+    
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        spaceAfter=12
+    )
+    
+    user_style = ParagraphStyle(
+        'UserMessage',
+        parent=styles['Normal'],
+        fontSize=11,
+        leftIndent=0,
+        spaceAfter=6,
+        fontName='Helvetica-Bold'
+    )
+    
+    assistant_style = ParagraphStyle(
+        'AssistantMessage',
+        parent=styles['Normal'],
+        fontSize=11,
+        leftIndent=0,
+        spaceAfter=6,
+        fontName='Helvetica-Bold'
+    )
+    
+    content_style = ParagraphStyle(
+        'Content',
+        parent=styles['Normal'],
+        fontSize=10,
+        leftIndent=20,
+        spaceAfter=12,
+        alignment=TA_LEFT
+    )
+    
+    source_style = ParagraphStyle(
+        'Source',
+        parent=styles['Normal'],
+        fontSize=8,
+        leftIndent=40,
+        spaceAfter=6
+    )
+    
+    story = []
+    
+    # Title
+    story.append(Paragraph("Chat History Export", title_style))
+    story.append(Spacer(1, 0.2*inch))
+    
+    # Check if there are messages
+    if not st.session_state.messages:
+        story.append(Paragraph("No chat history available.", content_style))
+    
+    # Chat messages
+    for msg in st.session_state.messages:
+        role = msg["role"].capitalize()
+        content = escape(msg["content"])
+        
+        # Role header
+        if msg["role"] == "user":
+            story.append(Paragraph(f"User:", user_style))
+        else:
+            story.append(Paragraph(f"Assistant:", assistant_style))
+        
+        # Message content - split into paragraphs for better formatting
+        for para in content.split('\n'):
+            if para.strip():
+                story.append(Paragraph(para, content_style))
+        
+        # Sources (if assistant message)
+        if msg["role"] == "assistant" and "sources" in msg and msg["sources"]:
+            story.append(Spacer(1, 0.1*inch))
+            story.append(Paragraph("<b>Sources:</b>", content_style))
+            for doc in msg["sources"]:
+                m = doc.metadata
+                rerank_score = m.get("rerank_score_norm", "N/A")
+                embed_score = m.get("embedding_score", "N/A")
+                source = m.get("source", "Unknown")
+                page = m.get("page", "")
+                chunk_id = m.get("chunk_id", "")
+                
+                source_text = escape(f"{source} (Page {page}, Chunk {chunk_id}) - Rerank: {rerank_score}, Embed: {embed_score}")
+                story.append(Paragraph(source_text, source_style))
+                
+                # Chunk preview
+                chunk_preview = escape(doc.page_content[:200])
+                story.append(Paragraph(f"<i>{chunk_preview}...</i>", source_style))
+        
+        story.append(Spacer(1, 0.2*inch))
+    
+    pdf_doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page Config
@@ -147,6 +306,35 @@ st.caption(
     f"FAISS k: **{retrieval_k}** · "
     f"Chunks to LLM: **{top_n}**"
 )
+
+# Export Chat History
+st.subheader("💾 Export Chat History")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.download_button(
+        label="📄 JSON",
+        data=export_chat_json(),
+        file_name="chat_history.json",
+        mime="application/json",
+        use_container_width=True
+    )
+with col2:
+    st.download_button(
+        label="📝 Text",
+        data=export_chat_text(),
+        file_name="chat_history.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+with col3:
+    st.download_button(
+        label="📖 PDF",
+        data=export_chat_pdf(),
+        file_name="chat_history.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
+
 st.divider()
 
 
