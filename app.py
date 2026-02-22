@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from io import BytesIO
+import base64
+import tempfile
 
 load_dotenv()
 
@@ -28,6 +30,18 @@ from langchain_openai import OpenAIEmbeddings
 from src.chain import initialise_pipeline, run_query
 import time
 from datetime import datetime
+from collections import Counter
+import pandas as pd
+
+# Voice integration imports
+try:
+    import speech_recognition as sr
+    from gtts import gTTS
+    from audio_recorder_streamlit import audio_recorder
+    VOICE_AVAILABLE = True
+except ImportError:
+    VOICE_AVAILABLE = False
+    audio_recorder = None
 from collections import Counter
 import pandas as pd
 
@@ -224,6 +238,130 @@ def render_analytics_dashboard():
             st.session_state.pop("analytics", None)
             init_analytics()
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Voice Integration Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def text_to_speech(text, tld='co.uk'):
+    """Convert text to speech and return audio file.
+    
+    Args:
+        text: Text to convert to speech
+        tld: Top-level domain for accent (co.uk for British, com for American, etc.)
+    """
+    if not VOICE_AVAILABLE:
+        return None
+    
+    try:
+        # Create a temporary file for the audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
+            # Use British English accent with tld='co.uk'
+            tts = gTTS(text=text, lang='en', tld=tld, slow=False)
+            tts.save(fp.name)
+            
+            # Read the audio file
+            with open(fp.name, 'rb') as audio_file:
+                audio_bytes = audio_file.read()
+            
+            # Clean up temp file
+            os.unlink(fp.name)
+            
+            return audio_bytes
+    except Exception as e:
+        st.error(f"Text-to-speech error: {e}")
+        return None
+
+def create_audio_player(audio_bytes):
+    """Create an HTML audio player for the given audio bytes."""
+    if audio_bytes:
+        audio_base64 = base64.b64encode(audio_bytes).decode()
+        audio_html = f"""
+        <audio controls autoplay style="width: 100%;">
+            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+            Your browser does not support the audio element.
+        </audio>
+        """
+        return audio_html
+    return None
+
+def speech_to_text_from_file(audio_file):
+    """Convert uploaded audio file to text using speech recognition."""
+    if not VOICE_AVAILABLE:
+        return None
+    
+    try:
+        recognizer = sr.Recognizer()
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as fp:
+            fp.write(audio_file.read())
+            temp_path = fp.name
+        
+        # Convert speech to text
+        with sr.AudioFile(temp_path) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+        
+        # Clean up
+        os.unlink(temp_path)
+        
+        return text
+    except sr.UnknownValueError:
+        st.error("Could not understand audio")
+        return None
+    except sr.RequestError as e:
+        st.error(f"Speech recognition error: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Error processing audio: {e}")
+        return None
+
+def speech_to_text_from_bytes(audio_bytes):
+    """Convert audio bytes to text using speech recognition with improved preprocessing."""
+    if not VOICE_AVAILABLE or not audio_bytes:
+        return None
+    
+    try:
+        recognizer = sr.Recognizer()
+        
+        # Adjust recognizer settings for better accuracy
+        recognizer.energy_threshold = 300  # Minimum audio energy to consider for recording
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 0.8  # Seconds of non-speaking audio before phrase is complete
+        
+        # Save audio bytes temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as fp:
+            fp.write(audio_bytes)
+            temp_path = fp.name
+        
+        # Convert speech to text
+        with sr.AudioFile(temp_path) as source:
+            # Adjust for ambient noise
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            # Record the audio
+            audio_data = recognizer.record(source)
+            
+            # Try Google Speech Recognition
+            try:
+                text = recognizer.recognize_google(audio_data, language='en-US', show_all=False)
+                os.unlink(temp_path)
+                return text
+            except sr.UnknownValueError:
+                # Try with UK English
+                try:
+                    text = recognizer.recognize_google(audio_data, language='en-GB', show_all=False)
+                    os.unlink(temp_path)
+                    return text
+                except sr.UnknownValueError:
+                    os.unlink(temp_path)
+                    return "Could not understand audio. Please speak clearly and try again."
+        
+    except sr.RequestError as e:
+        return f"Speech recognition service error: {e}. Please check your internet connection."
+    except Exception as e:
+        return f"Error processing audio: {str(e)}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -659,6 +797,88 @@ with col3:
 
 st.divider()
 
+# Voice Controls
+if VOICE_AVAILABLE:
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.subheader("🎤 Voice Input")
+    
+    with col2:
+        enable_tts = st.checkbox(
+            "🔊 TTS",
+            value=st.session_state.get("enable_tts", False),
+            help="Enable Text-to-Speech for responses"
+        )
+        st.session_state.enable_tts = enable_tts
+    
+    with col3:
+        voice_accent = st.selectbox(
+            "Voice",
+            options=["British 🇬🇧", "American 🇺🇸", "Australian 🇦🇺", "Indian 🇮🇳"],
+            index=0,
+            help="Select voice accent"
+        )
+        # Map accent to TLD
+        accent_map = {
+            "British 🇬🇧": "co.uk",
+            "American 🇺🇸": "com",
+            "Australian 🇦🇺": "com.au",
+            "Indian 🇮🇳": "co.in"
+        }
+        st.session_state.voice_tld = accent_map[voice_accent]
+    
+    # Audio recorder
+    st.markdown("**Click the microphone to record your question:**")
+    
+    with st.expander("💡 Tips for better voice recognition", expanded=False):
+        st.markdown("""
+        - Speak clearly and at a moderate pace
+        - Reduce background noise
+        - Hold the microphone/device at a consistent distance
+        - Record for 2-5 seconds minimum
+        - Ensure good internet connection (uses Google Speech API)
+        - Try speaking in a quiet environment
+        """)
+    
+    audio_bytes = audio_recorder(
+        text="",
+        recording_color="#e74c3c",
+        neutral_color="#3498db",
+        icon_name="microphone",
+        icon_size="2x",
+    )
+    
+    if audio_bytes:
+        st.audio(audio_bytes, format="audio/wav")
+        
+        col_a, col_b = st.columns(2)
+        
+        with col_a:
+            if st.button("🎤 Convert to Text and Send", use_container_width=True, type="primary"):
+                with st.spinner("Converting speech to text..."):
+                    transcribed_text = speech_to_text_from_bytes(audio_bytes)
+                    if transcribed_text and not transcribed_text.startswith("Could not") and not transcribed_text.startswith("Speech recognition") and not transcribed_text.startswith("Error"):
+                        st.session_state.voice_input = transcribed_text
+                        st.success(f"✅ Transcribed: {transcribed_text}")
+                        st.rerun()
+                    else:
+                        st.error(transcribed_text if transcribed_text else "Failed to transcribe audio")
+        
+        with col_b:
+            if st.button("🔍 Test Transcription Only", use_container_width=True):
+                with st.spinner("Testing transcription..."):
+                    transcribed_text = speech_to_text_from_bytes(audio_bytes)
+                    if transcribed_text and not transcribed_text.startswith("Could not") and not transcribed_text.startswith("Speech recognition") and not transcribed_text.startswith("Error"):
+                        st.info(f"📝 Transcribed text: **{transcribed_text}**")
+                    else:
+                        st.error(transcribed_text if transcribed_text else "Failed to transcribe audio")
+
+else:
+    st.warning("⚠️ Voice features unavailable. Install required packages: `pip install SpeechRecognition gTTS audio-recorder-streamlit`")
+
+st.divider()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chat History Display
@@ -692,6 +912,17 @@ def render_sources(source_docs: list):
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        
+        # Add TTS playback for assistant messages
+        if msg["role"] == "assistant" and VOICE_AVAILABLE and st.session_state.get("enable_tts", False):
+            if st.button(f"🔊 Play Audio", key=f"tts_{st.session_state.messages.index(msg)}"):
+                with st.spinner("Generating audio..."):
+                    tld = st.session_state.get("voice_tld", "co.uk")
+                    audio_bytes = text_to_speech(msg["content"], tld=tld)
+                    if audio_bytes:
+                        audio_html = create_audio_player(audio_bytes)
+                        st.markdown(audio_html, unsafe_allow_html=True)
+        
         if msg["role"] == "assistant" and msg.get("sources"):
             with st.expander("📄 Retrieved Sources", expanded=False):
                 render_sources(msg["sources"])
@@ -701,7 +932,14 @@ for msg in st.session_state.messages:
 # Query Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
-if query := st.chat_input("Ask anything about your document..."):
+# Check for voice input
+if "voice_input" in st.session_state and st.session_state.voice_input:
+    query = st.session_state.voice_input
+    st.session_state.pop("voice_input")
+else:
+    query = st.chat_input("Ask anything about your document...")
+
+if query:
 
     # Display user message
     st.session_state.messages.append({"role": "user", "content": query})
@@ -735,6 +973,15 @@ if query := st.chat_input("Ask anything about your document..."):
                 response_time = time.time() - start_time
 
         st.markdown(answer)
+        
+        # Auto-play TTS if enabled
+        if VOICE_AVAILABLE and st.session_state.get("enable_tts", False):
+            with st.spinner("Generating audio..."):
+                tld = st.session_state.get("voice_tld", "co.uk")
+                audio_bytes = text_to_speech(answer, tld=tld)
+                if audio_bytes:
+                    audio_html = create_audio_player(audio_bytes)
+                    st.markdown(audio_html, unsafe_allow_html=True)
 
         if sources:
             with st.expander("📄 Retrieved Sources", expanded=False):
