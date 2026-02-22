@@ -198,6 +198,102 @@ st.set_page_config(
 
 with st.sidebar:
     st.title("⚙️ Settings")
+    
+    # Define vectorstore_dir early so it can be used in upload section
+    vectorstore_dir_default = "./vectorstore"
+
+    st.subheader("📤 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Upload documents to add to knowledge base",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        help="Upload PDF, DOCX, or TXT files. They will be automatically processed and added to the vectorstore."
+    )
+    
+    if uploaded_files:
+        if st.button("🔄 Process Uploaded Files", use_container_width=True):
+            with st.spinner("Processing uploaded documents..."):
+                try:
+                    from pathlib import Path
+                    from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+                    from langchain_text_splitters import RecursiveCharacterTextSplitter
+                    
+                    # Save uploaded files temporarily
+                    docs_dir = Path("./docs")
+                    docs_dir.mkdir(exist_ok=True)
+                    
+                    saved_files = []
+                    for uploaded_file in uploaded_files:
+                        file_path = docs_dir / uploaded_file.name
+                        with open(file_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        saved_files.append(file_path)
+                    
+                    # Load and process documents
+                    LOADER_MAP = {
+                        ".pdf": PyPDFLoader,
+                        ".docx": Docx2txtLoader,
+                        ".txt": TextLoader,
+                    }
+                    
+                    all_docs = []
+                    for file_path in saved_files:
+                        ext = file_path.suffix.lower()
+                        loader_cls = LOADER_MAP[ext]
+                        loader = loader_cls(str(file_path))
+                        docs = loader.load()
+                        
+                        for doc in docs:
+                            doc.metadata["source"] = file_path.name
+                            doc.metadata["file_path"] = str(file_path)
+                        
+                        all_docs.extend(docs)
+                    
+                    # Chunk documents
+                    splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=512,
+                        chunk_overlap=64,
+                        length_function=len,
+                        separators=["\n\n", "\n", ". ", " ", ""],
+                    )
+                    chunks = splitter.split_documents(all_docs)
+                    
+                    for i, chunk in enumerate(chunks):
+                        chunk.metadata["chunk_id"] = i
+                    
+                    # Add to existing vectorstore or create new one
+                    embeddings = OpenAIEmbeddings(
+                        model="text-embedding-3-small",
+                        openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+                    )
+                    
+                    vectorstore_path = Path(vectorstore_dir_default)
+                    if vectorstore_path.exists():
+                        # Load existing and merge
+                        existing_vs = FAISS.load_local(
+                            str(vectorstore_path),
+                            embeddings,
+                            allow_dangerous_deserialization=True,
+                        )
+                        new_vs = FAISS.from_documents(chunks, embeddings)
+                        existing_vs.merge_from(new_vs)
+                        existing_vs.save_local(str(vectorstore_path))
+                    else:
+                        # Create new vectorstore
+                        vectorstore_path.mkdir(parents=True, exist_ok=True)
+                        new_vs = FAISS.from_documents(chunks, embeddings)
+                        new_vs.save_local(str(vectorstore_path))
+                    
+                    st.success(f"✅ Successfully processed {len(uploaded_files)} file(s) and added {len(chunks)} chunks to the vectorstore!")
+                    st.info("🔄 Reloading vectorstore... Please refresh the page to use the updated knowledge base.")
+                    
+                    # Clear pipeline to force reload
+                    st.session_state.pop("pipeline", None)
+                    
+                except Exception as e:
+                    st.error(f"❌ Error processing files: {type(e).__name__}: {e}")
+    
+    st.divider()
 
     st.subheader("Reranker")
     reranker_choice = st.radio(
@@ -239,7 +335,7 @@ with st.sidebar:
     st.subheader("Vectorstore")
     vectorstore_dir = st.text_input(
         "Vectorstore path",
-        value="./vectorstore",
+        value=vectorstore_dir_default,
         help="Path to the FAISS vectorstore built by ingest.py",
     )
 
