@@ -26,6 +26,204 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
 from src.chain import initialise_pipeline, run_query
+import time
+from datetime import datetime
+from collections import Counter
+import pandas as pd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Analytics Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_analytics():
+    """Initialize analytics tracking in session state."""
+    if "analytics" not in st.session_state:
+        st.session_state.analytics = {
+            "queries": [],
+            "response_times": [],
+            "source_usage": [],
+            "reranker_usage": {"cohere": 0, "bge": 0},
+            "timestamps": [],
+            "retrieval_k_values": [],
+            "top_n_values": [],
+        }
+
+def log_query_analytics(query, response_time, sources, reranker, retrieval_k, top_n):
+    """Log analytics data for a query."""
+    if "analytics" not in st.session_state:
+        init_analytics()
+    
+    st.session_state.analytics["queries"].append(query)
+    st.session_state.analytics["response_times"].append(response_time)
+    st.session_state.analytics["timestamps"].append(datetime.now())
+    st.session_state.analytics["retrieval_k_values"].append(retrieval_k)
+    st.session_state.analytics["top_n_values"].append(top_n)
+    st.session_state.analytics["reranker_usage"][reranker] += 1
+    
+    # Track source usage
+    for doc in sources:
+        source_name = doc.metadata.get("source", "Unknown")
+        st.session_state.analytics["source_usage"].append(source_name)
+
+def get_analytics_summary():
+    """Generate analytics summary statistics."""
+    if "analytics" not in st.session_state or not st.session_state.analytics["queries"]:
+        return None
+    
+    analytics = st.session_state.analytics
+    
+    # Calculate statistics
+    total_queries = len(analytics["queries"])
+    avg_response_time = sum(analytics["response_times"]) / total_queries if total_queries > 0 else 0
+    min_response_time = min(analytics["response_times"]) if analytics["response_times"] else 0
+    max_response_time = max(analytics["response_times"]) if analytics["response_times"] else 0
+    
+    # Source usage frequency
+    source_counter = Counter(analytics["source_usage"])
+    
+    # Average retrieval settings
+    avg_k = sum(analytics["retrieval_k_values"]) / total_queries if total_queries > 0 else 0
+    avg_top_n = sum(analytics["top_n_values"]) / total_queries if total_queries > 0 else 0
+    
+    return {
+        "total_queries": total_queries,
+        "avg_response_time": avg_response_time,
+        "min_response_time": min_response_time,
+        "max_response_time": max_response_time,
+        "source_usage": dict(source_counter.most_common()),
+        "reranker_usage": analytics["reranker_usage"],
+        "avg_k": avg_k,
+        "avg_top_n": avg_top_n,
+        "timestamps": analytics["timestamps"],
+        "response_times": analytics["response_times"],
+    }
+
+def render_analytics_dashboard():
+    """Render the analytics dashboard."""
+    st.title("📊 Analytics Dashboard")
+    
+    summary = get_analytics_summary()
+    
+    if summary is None:
+        st.info("No analytics data available yet. Start chatting to generate analytics!")
+        return
+    
+    # Overview metrics
+    st.subheader("📈 Overview")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Queries", summary["total_queries"])
+    with col2:
+        st.metric("Avg Response Time", f"{summary['avg_response_time']:.2f}s")
+    with col3:
+        st.metric("Min Response Time", f"{summary['min_response_time']:.2f}s")
+    with col4:
+        st.metric("Max Response Time", f"{summary['max_response_time']:.2f}s")
+    
+    st.divider()
+    
+    # Response time chart
+    st.subheader("⏱️ Response Time Trends")
+    if summary["response_times"]:
+        df_response = pd.DataFrame({
+            "Query #": range(1, len(summary["response_times"]) + 1),
+            "Response Time (s)": summary["response_times"]
+        })
+        st.line_chart(df_response.set_index("Query #"))
+    
+    st.divider()
+    
+    # Source usage
+    st.subheader("📄 Source Document Usage")
+    if summary["source_usage"]:
+        df_sources = pd.DataFrame(
+            list(summary["source_usage"].items()),
+            columns=["Document", "Times Retrieved"]
+        ).sort_values("Times Retrieved", ascending=False)
+        
+        st.bar_chart(df_sources.set_index("Document"))
+        
+        with st.expander("View Detailed Source Statistics"):
+            st.dataframe(df_sources, use_container_width=True)
+    else:
+        st.info("No source usage data available.")
+    
+    st.divider()
+    
+    # Reranker usage
+    st.subheader("🔄 Reranker Usage")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Cohere API", summary["reranker_usage"]["cohere"])
+    with col2:
+        st.metric("BGE Local", summary["reranker_usage"]["bge"])
+    
+    if summary["reranker_usage"]["cohere"] > 0 or summary["reranker_usage"]["bge"] > 0:
+        df_reranker = pd.DataFrame({
+            "Reranker": ["Cohere", "BGE"],
+            "Usage Count": [summary["reranker_usage"]["cohere"], summary["reranker_usage"]["bge"]]
+        })
+        st.bar_chart(df_reranker.set_index("Reranker"))
+    
+    st.divider()
+    
+    # Retrieval settings
+    st.subheader("⚙️ Average Retrieval Settings")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Avg FAISS k", f"{summary['avg_k']:.1f}")
+    with col2:
+        st.metric("Avg Chunks to LLM", f"{summary['avg_top_n']:.1f}")
+    
+    st.divider()
+    
+    # Query history
+    st.subheader("📝 Recent Queries")
+    if st.session_state.analytics["queries"]:
+        recent_queries = list(zip(
+            st.session_state.analytics["timestamps"][-10:],
+            st.session_state.analytics["queries"][-10:],
+            st.session_state.analytics["response_times"][-10:]
+        ))
+        
+        df_queries = pd.DataFrame(
+            recent_queries,
+            columns=["Timestamp", "Query", "Response Time (s)"]
+        )
+        df_queries["Timestamp"] = df_queries["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        st.dataframe(df_queries, use_container_width=True)
+    
+    st.divider()
+    
+    # Export and reset options
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📥 Export Analytics as JSON", use_container_width=True):
+            analytics_json = json.dumps({
+                "total_queries": summary["total_queries"],
+                "avg_response_time": summary["avg_response_time"],
+                "min_response_time": summary["min_response_time"],
+                "max_response_time": summary["max_response_time"],
+                "source_usage": summary["source_usage"],
+                "reranker_usage": summary["reranker_usage"],
+                "queries": st.session_state.analytics["queries"],
+                "response_times": st.session_state.analytics["response_times"],
+            }, indent=2)
+            st.download_button(
+                "Download Analytics JSON",
+                analytics_json,
+                "analytics.json",
+                "application/json",
+                use_container_width=True
+            )
+    
+    with col2:
+        if st.button("🗑️ Reset Analytics", use_container_width=True):
+            st.session_state.pop("analytics", None)
+            init_analytics()
+            st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +390,9 @@ st.set_page_config(
     layout="wide",
 )
 
+# Initialize analytics
+init_analytics()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar — Configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,8 +400,33 @@ st.set_page_config(
 with st.sidebar:
     st.title("⚙️ Settings")
     
+    # Navigation
+    st.subheader("📍 Navigation")
+    page = st.radio(
+        "Go to",
+        ["💬 Chat", "📊 Analytics"],
+        index=0,
+        key="nav_radio"
+    )
+    
+    st.divider()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Analytics Page
+# ─────────────────────────────────────────────────────────────────────────────
+
+if page == "📊 Analytics":
+    render_analytics_dashboard()
+    st.stop()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat Page - Sidebar Configuration Continued
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
     # Define vectorstore_dir early so it can be used in upload section
     vectorstore_dir_default = "./vectorstore"
+
 
     st.subheader("📤 Upload Documents")
     uploaded_files = st.file_uploader(
@@ -485,6 +711,7 @@ if query := st.chat_input("Ask anything about your document..."):
     # Run pipeline
     with st.chat_message("assistant"):
         with st.spinner("Retrieving, reranking, and generating..."):
+            start_time = time.time()
             try:
                 result = run_query(
                     query=query,
@@ -497,10 +724,15 @@ if query := st.chat_input("Ask anything about your document..."):
                 )
                 answer = result["answer"]
                 sources = result["source_documents"]
+                response_time = time.time() - start_time
+                
+                # Log analytics
+                log_query_analytics(query, response_time, sources, reranker, retrieval_k, top_n)
 
             except Exception as e:
                 answer = f"⚠️ Pipeline error: `{type(e).__name__}: {e}`"
                 sources = []
+                response_time = time.time() - start_time
 
         st.markdown(answer)
 
